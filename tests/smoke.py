@@ -1,8 +1,8 @@
 """Run against the actual server: python tests/smoke.py"""
-import json, urllib.request, urllib.error, tempfile
+import json, os, urllib.request, urllib.error, tempfile
 from pathlib import Path
 import cadquery as cq
-BASE='http://127.0.0.1:8000'
+BASE=os.environ.get('FORMLAB_URL','http://127.0.0.1:8000')
 def post(path,body):
     req=urllib.request.Request(BASE+path,data=json.dumps(body).encode(),headers={'Content-Type':'application/json'})
     with urllib.request.urlopen(req) as r:return json.load(r)

@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends libgl1 libglib2
 WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
-COPY app.py ./
+COPY app.py imports.py ./
 COPY --from=frontend /build/dist ./dist
 RUN useradd -m designer && mkdir artifacts && chown designer:designer artifacts
 USER designer

@@ -1,8 +1,10 @@
 from pathlib import Path
-import json, os, re, uuid
+import json, os, re, uuid, shutil
 import urllib.request, urllib.error
 import cadquery as cq
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from starlette.concurrency import run_in_threadpool
+from imports import board_preview
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -126,9 +128,48 @@ def generate(d: Design):
     except HTTPException: raise
     except Exception as e: raise HTTPException(422,'几何构建失败，请调整尺寸。') from e
 
+def process_import(folder, ext):
+    if ext in ('.step', '.stp'):
+        shape = cq.importers.importStep(str(folder/'source.step'))
+        if not shape.val().isValid(): raise ValueError('invalid STEP')
+        box = shape.val().BoundingBox()
+        cq.exporters.export(shape, str(folder/'model.stl'), tolerance=0.1, angularTolerance=0.2)
+        return {'mode':'mechanical','preview':f'/api/files/{folder.name}/model.stl',
+                'files':{'原始 STEP':f'/api/files/{folder.name}/source.step','STL':f'/api/files/{folder.name}/model.stl'},
+                'dimensions':[round(box.xlen,3),round(box.ylen,3),round(box.zlen,3)],
+                'warnings':['保留导入几何；暂不支持恢复原建模历史或通过模板参数编辑。']}
+    svg, counts, omitted = board_preview((folder/'board.kicad_pcb').read_text(encoding='utf-8-sig'))
+    (folder/'preview.svg').write_text(svg)
+    return {'mode':'pcb','preview':f'/api/files/{folder.name}/preview.svg','counts':counts,
+            'files':{'原始 KiCad PCB':f'/api/files/{folder.name}/board.kicad_pcb'},
+            'warnings':['二维几何预览；不执行电气或制造校验。'] + (['未完整显示：'+', '.join(omitted)] if omitted else [])}
+
+@app.post('/api/import')
+async def import_file(request: Request, filename: str):
+    ext=Path(filename).suffix.lower()
+    if ext not in ('.step','.stp','.kicad_pcb'):raise HTTPException(415,'服务端支持 STEP/STP 和 KiCad PCB；STL/OBJ/GLB 请通过网页本地导入。')
+    folder=OUT/uuid.uuid4().hex;folder.mkdir()
+    source=folder/('board.kicad_pcb' if ext=='.kicad_pcb' else 'source.step')
+    total=0
+    try:
+        with source.open('wb') as target:
+            async for chunk in request.stream():
+                total+=len(chunk)
+                if total>20*1024*1024:raise HTTPException(413,'文件不得超过 20 MB。')
+                target.write(chunk)
+        if total==0:raise HTTPException(422,'文件为空。')
+        data=await run_in_threadpool(process_import,folder,ext)
+        return dict(data,id=folder.name,name=Path(filename).name)
+    except HTTPException:
+        shutil.rmtree(folder,ignore_errors=True)
+        raise
+    except Exception as error:
+        shutil.rmtree(folder,ignore_errors=True)
+        raise HTTPException(422,'无法读取文件：格式无效、版本不支持或没有可预览几何。') from error
+
 @app.get('/api/files/{ident}/{name}')
 def download(ident:str,name:str):
-    if not re.fullmatch('[a-f0-9]{32}',ident) or name not in ['model.step','model.stl','board.kicad_pcb']: raise HTTPException(404)
+    if not re.fullmatch('[a-f0-9]{32}',ident) or name not in ['model.step','model.stl','board.kicad_pcb','source.step','preview.svg']: raise HTTPException(404)
     path=OUT/ident/name
     if not path.is_file(): raise HTTPException(404)
     return FileResponse(path,filename=name)
